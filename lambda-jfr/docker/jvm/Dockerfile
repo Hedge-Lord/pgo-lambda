@@ -39,6 +39,17 @@ COPY --from=build /etc/group  /etc/group
 # enable JFR
 ENV JAVA_TOOL_OPTIONS="-XX:StartFlightRecording=filename=/tmp/flight.jfr,settings=profile,dumponexit=true,maxsize=100M,maxage=30m"
 
+# Install helpers
+RUN dnf install -y jq unzip \
+ && curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip \
+ && unzip /tmp/awscliv2.zip -d /tmp \
+ && /tmp/aws/install --bin-dir /usr/local/bin \
+ && rm -rf /tmp/aws*
+
+# Copy in our extension
+COPY extensions/jfr-uploader/jfr-uploader /opt/extensions/jfr-uploader
+RUN chmod +x /opt/extensions/jfr-uploader
+
 # Use the AWS Lambda Runtime Interface Client with the correct Java path
 ENTRYPOINT [ "/opt/graalvm/bin/java", "-cp", "/var/task/*", "com.amazonaws.services.lambda.runtime.api.client.AWSLambda" ]
 CMD [ "com.example.Handler::handleRequest" ]

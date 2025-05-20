@@ -1,7 +1,0 @@
-#!/bin/sh
-set -euo pipefail
-
-exec java $JAVA_TOOL_OPTIONS \
-  -cp "/var/task/*:/opt/ric/*" \
-  com.amazonaws.services.lambda.runtime.api.client.AWSLambda \
-  com.example.Handler::handleRequest
