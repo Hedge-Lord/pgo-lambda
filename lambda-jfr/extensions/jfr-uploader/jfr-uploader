@@ -8,65 +8,62 @@ echo "[jfr-uploader] Starting..."
 echo "[jfr-uploader] RAW_BUCKET=$RAW_BUCKET"
 echo "[jfr-uploader] AWS_REGION=$AWS_REGION"
 
-# ── register ───────────────────────────────────────────
+# register 
 RESP_HEADERS=$(mktemp)
 curl -s -D "$RESP_HEADERS" -o /dev/null \
   -X POST "http://${AWS_LAMBDA_RUNTIME_API}/2020-01-01/extension/register" \
   -H "Lambda-Extension-Name: jfr-uploader" \
-  -d '{"events":["INVOKE","SHUTDOWN"]}'
+  -d '{"events":["INVOKE"]}'
 EXT_ID=$(awk '/Lambda-Extension-Identifier/ {print $2}' "$RESP_HEADERS" | tr -d $'\r')
 
 echo "[jfr-uploader] Registered with extension ID: $EXT_ID"
 
-# ── cache VMID once ────────────────────────────────────
+# cache VMID once 
 echo "[jfr-uploader] Running jcmd -l to identify JVM"
 jcmd -l | tee /tmp/jcmd.log
 VMID=$(awk '/com\.example\.Handler|bootstrap/ {print $1; exit}' /tmp/jcmd.log)
 if [[ -z "$VMID" ]]; then
-  echo "[jfr-uploader] ❌ Failed to identify JVM process ID."
+  echo "[jfr-uploader] Failed to identify JVM process ID."
   exit 1
 fi
-echo "[jfr-uploader] ✅ JVM attached: VMID=$VMID"
+echo "[jfr-uploader] JVM attached: VMID=$VMID"
 
 NEXT_URL="http://${AWS_LAMBDA_RUNTIME_API}/2020-01-01/extension/event/next"
 
 dump_and_ship () {
   local ts=$(date +%s)
   local base="/tmp/flight-${ts}.jfr"
-  echo "[jfr-uploader] 🌀 Dumping JFR slice to $base"
-  jcmd "$VMID" JFR.dump filename="$base" || { echo "[jfr-uploader] ❌ JFR.dump failed"; return; }
-  jcmd "$VMID" JFR.rotate || echo "[jfr-uploader] ⚠️  JFR.rotate failed (nonfatal)"
-  echo "[jfr-uploader] ✅ JFR written; compressing..."
+  echo "[jfr-uploader] Dumping JFR slice to $base"
+  jcmd "$VMID" JFR.dump filename="$base" || { echo "[jfr-uploader] JFR.dump failed"; return; }
+  echo "[jfr-uploader] JFR written; compressing..."
   gzip "$base"
 
   local key="flight/${AWS_LAMBDA_FUNCTION_NAME}/${AWS_LAMBDA_FUNCTION_VERSION}/${ts}.jfr.gz"
   local full_path="${base}.gz"
-  echo "[jfr-uploader] 📤 Uploading $full_path to s3://$RAW_BUCKET/$key ..."
+  echo "[jfr-uploader] Uploading $full_path to s3://$RAW_BUCKET/$key ..."
   aws s3 cp "$full_path" "s3://$RAW_BUCKET/$key" \
     --region "$AWS_REGION" --no-progress \
     2>&1 | tee "/tmp/s3upload-${ts}.log"
 
   if [[ ${PIPESTATUS[0]} -ne 0 ]]; then
-    echo "[jfr-uploader] ❌ Upload failed – see /tmp/s3upload-${ts}.log"
+    echo "[jfr-uploader] Upload failed – see /tmp/s3upload-${ts}.log"
   else
-    echo "[jfr-uploader] ✅ Upload complete"
+    echo "[jfr-uploader] Upload complete"
   fi
 }
 
-# ── event loop ─────────────────────────────────────────
-first_dump_done=false
+# event loop with hacky first-dump-done flag
 
+# NOTE: WORKS, BUT SUCKS 
+invoke_count=1
 while true; do
   TYPE=$(curl -s "$NEXT_URL" -H "Lambda-Extension-Identifier: $EXT_ID" | jq -r .eventType)
-  echo "[jfr-uploader] 📦 Event received: $TYPE"
+  echo "[jfr-uploader] Event received: $TYPE"
   if [[ $TYPE == "INVOKE" ]]; then
-      echo "[jfr-uploader] 🚀 Dumping in background"
-      if [[ "$first_dump_done" == true ]]; then
-         echo "[jfr-uploader] 🚀 Dumping in background"
-         dump_and_ship              # fast – VMID cached, attach warm
-      else
-         echo "first dump done"
-         first_dump_done=true          # skip, just mark
-      fi
+      (( ++invoke_count % 5 == 0 )) && {
+        dump_and_ship &
+        child_pid=$!
+        wait $child_pid
+      }
   fi
 done
